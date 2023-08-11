@@ -36,23 +36,25 @@ const proposalNamespace = {
 
 eventEmitter = new EventEmitter();
 eventEmitter.on('create-order', (data) => {
-  const {id, value, to } = data;
-  if (orders[id]) {
-    clearInterval(orders[id]);
-  }
-  setInterval(async () => {
+  const { id, value, to, orderId } = data;
+  orders[orderId] = setInterval(async () => {
     try {
-      if (id) {
-        const session = sessions[id];
-        const account = session.namespaces.eip155.accounts[0].slice(9)
-        const result = await sendTransaction(session, account, to, value); // "0x16345785d8a0000"
-        console.log(result);
+      const session = sessions[id];
+      if (!session) {
+        throw new Error(`Cannot send transaction: Session ${id} not found`);
       }
+
+      if (!orders[orderId]) {
+        throw new Error(`Cannot send transaction: Order ${orderId} not found`);
+      }
+
+      const account = session.namespaces.eip155.accounts[0].slice(9)
+      const result = await sendTransaction(session, account, to, value); // "0x16345785d8a0000"
+      console.log("Transaction sent at", new Date().toISOString(), result);
     } catch (e) {
       console.error(e);
     }
-  }, 15000);
-  console.log(data);
+  }, 12000);
 });
 
 const app = express();
@@ -87,7 +89,8 @@ app.get('/connect', async (req, res) => {
         const session = await approval();
         sessions[id] = session;
 
-        res.json({ id, result });
+        console.log(result, id);
+        res.json({ id });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -98,18 +101,25 @@ app.post('/disconnect', async (req, res) => {
     const { id } = req.body;
     const session = sessions[id];
 
-    if (session === undefined) {
-      throw new Error(`Session ${id} not found`);
+    if (!session) {
+      res.status(400).json({ error: `Session ${id} not found` });
+      return;
     }
 
-    await fireblocks.removeWeb3Connection("WalletConnect", id);
     await signClient.disconnect({
       topic: session.topic,
       code: 6000,
       message: "User disconnected",
     });
 
+    const result = await fireblocks.removeWeb3Connection("WalletConnect", id);
     delete sessions[id];
+
+    Object.keys(orders).forEach(clearInterval);
+    orders = {};
+
+    console.log(result, id);
+
     res.json({ success: true });
 
   } catch (error) {
@@ -118,7 +128,6 @@ app.post('/disconnect', async (req, res) => {
 });
 
 const sendTransaction = async (session, from, to, value) => {
-    console.error(value);
     const tx = {
         from,
         to,
@@ -145,33 +154,28 @@ app.post('/send', async (req, res) => {
     try {
         const { to, id } = req.body;
         const session = sessions[id];
-        const from = session.namespaces.eip155.accounts[0].slice(9)
-        const result = await sendTransaction(session, from, to, "0x16345785d8a0000");
-
-        res.json({ txHash: result });
+        if (session) {
+          const from = session.namespaces.eip155.accounts[0].slice(9)
+          const result = await sendTransaction(session, from, to, "0x16345785d8a0000");
+          res.json({ txHash: result });
+        } else {
+          res.status(400).json({ error: `Session ${id} not found` });
+        }
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
 
-app.get('/get-account', async (req, res) => {
-  try {
-    const { id } = req.query;
-    const session = sessions[id];
-    const account = session.namespaces.eip155.accounts[0].slice(9)
-
-    res.json({ account });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
 app.post('/create-order', async (req, res) => {
   try {
     const { id, value, to } = req.body;
+    if (!id || !value || !to) {
+      res.status(400).json({ error: `Missing body params ${JSON.stringify(req.body)}` });
+      return;
+    }
     const orderId = uuidv4();
-    orders[orderId] = true
-    eventEmitter.emit('create-order', {id, orderId, value, to});
+    console.log("Creating order", orderId)
+    eventEmitter.emit('create-order', { id, orderId, value, to });
     res.json({ orderId });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -181,7 +185,18 @@ app.post('/create-order', async (req, res) => {
 app.post('/cancel-order', async (req, res) => {
   try {
     const { id, orderId } = req.body;
+    if (!id || !orderId) {
+      res.status(400).json({ error: `Missing body params ${JSON.stringify(req.body)}` });
+      return;
+    }
+
+    if (!orders[orderId]) {
+      res.status(400).json({ error: `Order ${orderId} not found` });
+      return;
+    }
+    clearInterval(orders[orderId]);
     delete orders[orderId];
+    console.log("Cancelled order", orderId);
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
